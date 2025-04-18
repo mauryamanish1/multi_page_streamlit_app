@@ -117,12 +117,15 @@ SIMILARITY_THRESHOLD = 0.4
 def download_pickle_if_needed():
     if not os.path.exists(PKL_FILE):
         with st.spinner("Downloading paragraph data..."):
-            r = requests.get(PKL_URL)
-            if r.status_code == 200:
+            try:
+                r = requests.get(PKL_URL)
+                r.raise_for_status()  # Raise an error for bad responses
                 with open(PKL_FILE, "wb") as f:
                     f.write(r.content)
-            else:
-                st.error("Failed to download the paragraph dataset.")
+                st.success("Model file successfully downloaded!")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Error downloading file: {e}")
+                raise e
 download_pickle_if_needed()
 
 # --- Cached loaders ---
@@ -132,6 +135,9 @@ def load_model():
 
 @st.cache_data
 def load_dataset():
+    # Load the dataset after checking it exists
+    if not os.path.exists(PKL_FILE):
+        download_pickle_if_needed()  # Ensure file is downloaded
     return pd.read_pickle(PKL_FILE)
 
 # --- Load resources ---
@@ -187,30 +193,6 @@ if st.button("🔍 Search"):
                 file_name="filtered_paragraphs.csv",
                 mime="text/csv"
             )
-
-
-# 3. Sentence Transformer model (if needed for embeddings)
-embedder = SentenceTransformer('paraphrase-MiniLM-L6-v2')
-
-# 4. UI to input text
-st.subheader("Input your sentence:")
-user_input = st.text_input("Enter text here:")
-
-# 5. Perform matching/translation logic
-if user_input:
-    # Simulate translation/matching – customize as per your actual logic
-    st.write("Generating result...")
-
-    # Example: You might have an embedding matching function
-    # Here we'll just return a dummy placeholder
-    # Replace this with your actual model logic
-    try:
-        # Dummy example
-        result = model.get(user_input, "No translation found.")
-        st.success(f"Translation: {result}")
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
-
 
 
 
