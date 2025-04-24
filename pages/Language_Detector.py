@@ -223,6 +223,7 @@ from googletrans import Translator, LANGUAGES
 translator = Translator()
 
 # --- CONFIGURATION ---
+MAX_CHUNK_LENGTH = 500  # Example: Split text into chunks of 500 characters
 DetectorFactory.seed = 0
 MIN_PARAGRAPH_WORDS = 10
 MAX_HEADING_WORDS = 10
@@ -272,38 +273,44 @@ def determine_page_layout(page, expected_layout, multi_column_threshold):
         else:
             return 'single'
 
-def extract_paragraph_blocks(pdf_path, expected_layout='single', multi_column_threshold=0.3):
+def extract_paragraph_blocks(pdf_file, expected_layout='single', multi_column_threshold=0.3):
     start_time = time.time()
-    doc = fitz.open(pdf_path)
-    paragraphs = []
-    page_layouts = {}
+    try:
+        doc = fitz.open(stream=pdf_file.read())
+        paragraphs = []
+        page_layouts = {}
 
-    for page_num, page in enumerate(doc, start=1):
-        layout = determine_page_layout(page, expected_layout, multi_column_threshold)
-        page_layouts[page_num] = layout
-        blocks = page.get_text("blocks")
-        if not blocks:
-            continue
-        current_paragraph = ""
-        last_block_bottom = None
-        for i, block in enumerate(blocks):
-            x0, y0, x1, y1, text, block_no, block_type = block
-            if x0 < page.rect.width * TOC_LEFT_THRESHOLD_PERCENT and get_word_count(text) <= MAX_HEADING_WORDS and y1 < page.rect.height * 0.7:
+        for page_num, page in enumerate(doc, start=1):
+            layout = determine_page_layout(page, expected_layout, multi_column_threshold)
+            page_layouts[page_num] = layout
+            blocks = page.get_text("blocks")
+            if not blocks:
                 continue
-            if block_type == 0:
-                if last_block_bottom is not None and abs(y0 - last_block_bottom) < 5:
-                    current_paragraph += " " + text.strip()
-                else:
-                    if current_paragraph and get_word_count(current_paragraph) >= MIN_PARAGRAPH_WORDS:
-                        paragraphs.append({'page': page_num, 'layout': layout, 'text': current_paragraph.strip()})
-                    current_paragraph = text.strip()
-                last_block_bottom = y1
-        if current_paragraph and get_word_count(current_paragraph) >= MIN_PARAGRAPH_WORDS:
-            paragraphs.append({'page': page_num, 'layout': layout, 'text': current_paragraph.strip()})
-    end_time = time.time()
-    extraction_time = end_time - start_time
-    st.sidebar.write(f"⏱️ Extraction time: {extraction_time:.2f} seconds")
-    return pd.DataFrame(paragraphs)
+            current_paragraph = ""
+            last_block_bottom = None
+            for i, block in enumerate(blocks):
+                x0, y0, x1, y1, text, block_no, block_type = block
+                if x0 < page.rect.width * TOC_LEFT_THRESHOLD_PERCENT and get_word_count(text) <= MAX_HEADING_WORDS and y1 < page.rect.height * 0.7:
+                    continue
+                if block_type == 0:
+                    if last_block_bottom is not None and abs(y0 - last_block_bottom) < 5:
+                        current_paragraph += " " + text.strip()
+                    else:
+                        if current_paragraph and get_word_count(current_paragraph) >= MIN_PARAGRAPH_WORDS:
+                            word_count = get_word_count(current_paragraph.strip())
+                            paragraphs.append({'page': page_num, 'layout': layout, 'text': current_paragraph.strip(), 'word_count': word_count})
+                        current_paragraph = text.strip()
+                    last_block_bottom = y1
+            if current_paragraph and get_word_count(current_paragraph) >= MIN_PARAGRAPH_WORDS:
+                word_count = get_word_count(current_paragraph.strip())
+                paragraphs.append({'page': page_num, 'layout': layout, 'text': current_paragraph.strip(), 'word_count': word_count})
+        end_time = time.time()
+        extraction_time = end_time - start_time
+        st.sidebar.write(f"⏱️ Extraction time: {extraction_time:.2f} seconds")
+        return pd.DataFrame(paragraphs)
+    except Exception as e:
+        st.error(f"Error opening or processing PDF: {e}")
+        return pd.DataFrame()
 
 def analyze_paragraphs_language(df_paragraphs):
     analyzed_data = []
@@ -314,7 +321,7 @@ def analyze_paragraphs_language(df_paragraphs):
         analyzed_data.append({
             'page': row['page'],
             'layout': row['layout'],
-            'word_count': get_word_count(text),
+            'word_count': row['word_count'], # Use existing word_count
             'text': text,
             'language_code': lang_code,
             'language': language
@@ -333,26 +340,62 @@ def analyze_paragraphs_language(df_paragraphs):
     st.sidebar.write(f"✅ Major language detected: {major_language}")
     return df_analyzed
 
+
+
 def verify_foreign_language_google(df_foreign, enable_google_verification=True):
     df_foreign['google_verified_language'] = None
     if not enable_google_verification:
         st.sidebar.warning("Google Translate verification is disabled.")
         return df_foreign
-    st.sidebar.info("⏳ Verifying foreign languages using Google Translate...")
+
+    verification_status = st.sidebar.empty()
+
+    verification_status.info("⏳ Verifying foreign languages using Google Translate...")
     for index, row in df_foreign.iterrows():
         text = row['text']
-        try:
-            detection = translator.detect(text)
-            detected_lang_code = detection.lang
-            if detected_lang_code in LANGUAGES:
-                df_foreign.loc[index, 'google_verified_language'] = LANGUAGES[detected_lang_code].capitalize()
-            else:
-                df_foreign.loc[index, 'google_verified_language'] = 'Unknown (Google)'
-        except Exception as e:
-            st.sidebar.error(f"🚫 Google Translate error for: '{text[:50]}...' - {e}")
+        detected_language = None
+        error_occurred = False
+
+        if len(text) > MAX_CHUNK_LENGTH:
+            chunks = [text[i:i + MAX_CHUNK_LENGTH] for i in range(0, len(text), MAX_CHUNK_LENGTH)]
+            detected_languages = []
+            for chunk in chunks:
+                try:
+                    detection = translator.detect(chunk)
+                    detected_languages.append(detection.lang)
+                    time.sleep(0.1)  # Be gentle
+                except Exception as e:
+                    st.sidebar.error(f"🚫 Google Translate error for chunk: '{chunk[:50]}...' - {e}")
+                    error_occurred = True
+                    break  # Stop processing further chunks for this text
+            if detected_languages:
+                # Take the most frequent detected language among chunks
+                language_counts = Counter(detected_languages)
+                most_common_lang = language_counts.most_common(1)[0][0]
+                if most_common_lang in LANGUAGES:
+                    detected_language = LANGUAGES[most_common_lang].capitalize()
+                else:
+                    detected_language = 'Unknown (Google)'
+        else:
+            try:
+                detection = translator.detect(text)
+                if detection.lang in LANGUAGES:
+                    detected_language = LANGUAGES[detection.lang].capitalize()
+                else:
+                    detected_language = 'Unknown (Google)'
+                time.sleep(0.1)  # Be gentle
+            except Exception as e:
+                st.sidebar.error(f"🚫 Google Translate error for text: '{text[:50]}...' - {e}")
+                error_occurred = True
+
+        if detected_language and not error_occurred:
+            df_foreign.loc[index, 'google_verified_language'] = detected_language
+        elif error_occurred:
             df_foreign.loc[index, 'google_verified_language'] = 'Error (Google)'
-            time.sleep(0.1) # Be gentle with the API
-    st.sidebar.success("✅ Google Translate verification complete.")
+        elif not detected_language and not error_occurred:
+            df_foreign.loc[index, 'google_verified_language'] = 'Unknown (Google)'
+
+    verification_status.success("✅ Google Translate verification complete.")
     return df_foreign
 
 def main():
@@ -372,7 +415,7 @@ def main():
         elif layout_option == "Multi Column":
             expected_layout = 'multi'
 
-        enable_google_verification = st.sidebar.checkbox("Verify with Google Translate", value=False)
+        enable_google_verification_option = st.sidebar.checkbox("Perform Google Translate Verification", value=False)
 
         if st.button("Process PDF"):
             with st.spinner("Extracting text and detecting languages..."):
@@ -387,32 +430,27 @@ def main():
                 if len(major_langs) > 0:
                     major_lang = ", ".join(major_langs)
 
-                df_foreign = df_language_analysis.loc[
-                    (df_language_analysis['is_foreign'] == True) &
-                    (df_language_analysis['word_count'] >= 5) &
-                    (df_language_analysis['language'] != 'Unknown')
-                ].copy()
+                df_foreign_initial = df_language_analysis.loc[(df_language_analysis['is_foreign'] == True) &(df_language_analysis['language']!='Unknown')][['page', 'word_count', 'text', 'language']].copy()
 
-                if not df_foreign.empty and enable_google_verification:
-                    with st.spinner("Verifying with Google Translate..."):
-                        df_foreign_verified = verify_foreign_language_google(df_foreign.copy(), enable_google_verification)
-                        df_display = df_foreign_verified.loc[df_foreign_verified['google_verified_language'] != major_lang][['page', 'word_count', 'text', 'language', 'google_verified_language']]
-                else:
-                    df_display = df_foreign[['page', 'word_count', 'text', 'language']]
-                    if not df_display.empty and not enable_google_verification:
-                        st.sidebar.info("Enable Google Translate in the sidebar for potential verification.")
-
-                if not df_display.empty:
-                    st.subheader("Detected Foreign Language Segments")
-                    st.write(f"Major Language(s): {major_lang}")
-                    st.dataframe(df_display)
+                st.subheader("Detected Foreign Language Segments (Initial)")
+                st.write(f"Major Language(s): {major_lang}")
+                if not df_foreign_initial.empty:
+                    st.dataframe(df_foreign_initial)
                 else:
                     st.info(f"No significant foreign language segments detected (excluding '{major_lang}').")
+
+                if enable_google_verification_option and not df_foreign_initial.empty:
+                    df_foreign_to_verify = df_foreign_initial.copy()
+                    with st.spinner("Verifying with Google Translate..."):
+                        df_foreign_verified = verify_foreign_language_google(df_foreign_to_verify, enable_google_verification=True)
+                        df_display = df_foreign_verified[['page', 'word_count', 'text', 'language', 'google_verified_language']]
+                        st.subheader("Detected Foreign Language Segments (Google Verified)")
+                        st.dataframe(df_display)
+                elif enable_google_verification_option and df_foreign_initial.empty:
+                    st.info("No foreign language segments to verify with Google Translate.")
 
             else:
                 st.warning("Could not extract text from the PDF.")
 
 if __name__ == "__main__":
     main()
-
-
