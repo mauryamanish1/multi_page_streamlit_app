@@ -479,9 +479,16 @@ def main():
                     df_foreign_to_verify = df_foreign_initial.copy()
                     with st.spinner("Verifying with Google Translate..."):
                         df_foreign_verified = verify_foreign_language_google(df_foreign_to_verify, enable_google_verification=True)
-                        df_display = df_foreign_verified[['page', 'word_count', 'text', 'language', 'google_verified_language']]
+
+                        # Filter for rows where the initial language is not the major language
+                        df_display = df_foreign_verified[df_foreign_verified['language'] != major_lang][['page', 'word_count', 'text', 'language', 'google_verified_language']]
+
                         st.subheader("Detected Foreign Language Segments (Google Verified)")
-                        st.dataframe(df_display)
+                        if not df_display.empty:
+                            st.dataframe(df_display)
+                        else:
+                            st.info(f"No initially detected foreign language segments were verified by Google Translate (excluding '{major_lang}').")
+
                 elif enable_google_verification_option and df_foreign_initial.empty:
                     st.info("No foreign language segments to verify with Google Translate.")
 
