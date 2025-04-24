@@ -459,7 +459,7 @@ def main():
 
             if not df_paragraphs.empty:
                 with st.spinner("Analyzing language (Initial)..."):
-                    df_language_analysis = analyze_paragraphs_language(df_paragraphs)
+                    df_language_analysis = enhanced_analyze_paragraphs_language(df_paragraphs)
 
                 major_lang = ""
                 major_langs = df_language_analysis.loc[df_language_analysis['is_major'] == True]['language'].unique().astype(str)
