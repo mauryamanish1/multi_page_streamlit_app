@@ -209,7 +209,6 @@
 ################### v2 below #################
 
 
-# %%
 import streamlit as st
 import fitz  # PyMuPDF
 import pandas as pd
@@ -218,18 +217,16 @@ from langdetect import detect, DetectorFactory
 from collections import Counter
 import re  # Import the 're' module
 from googletrans import Translator, LANGUAGES
-
+from language_styles import LANGUAGE_STYLES 
 # Initialize Google Translator
 translator = Translator()
 
 # --- CONFIGURATION ---
-MAX_CHUNK_LENGTH = 500  # Example: Split text into chunks of 500 characters
 DetectorFactory.seed = 0
 MIN_PARAGRAPH_WORDS = 10
 MAX_HEADING_WORDS = 10
 TOC_LEFT_THRESHOLD_PERCENT = 0.1
 MIN_ALPHA_RATIO_FOR_LANG_DETECTION = 0.4
-COMMON_SPANISH_WORDS = set(['TRABAJO', 'NÚM', 'DEL', 'DE', 'LA', 'EL', 'LOS', 'LAS', 'Y', 'A'])
 TARGET_LANG_CODES = {
     'en': 'English', 'bg': 'Bulgarian', 'zh': 'Chinese', 'cs': 'Czech', 'da': 'Danish',
     'nl': 'Dutch', 'et': 'Estonian', 'fi': 'Finnish', 'fr': 'French', 'de': 'German',
@@ -243,16 +240,18 @@ MULTI_COLUMN_THRESHOLD_PERCENT = 0.3
 def get_language_name(code):
     return TARGET_LANG_CODES.get(code, 'Unknown')
 
-def detect_language_limited_langdetect(text):
+def robust_detect_language(text, target_languages=TARGET_LANG_CODES.keys()):
     alpha_count = sum(c.isalpha() for c in text)
     if len(text) > 0 and alpha_count / len(text) < MIN_ALPHA_RATIO_FOR_LANG_DETECTION:
         return None
-    words = re.findall(r'\b\w+\b', text.upper())
-    if any(word in COMMON_SPANISH_WORDS for word in words):
-        return 'es'
+
     try:
+        # Try with specified target languages
         lang_code = detect(text)
-        return lang_code if lang_code in TARGET_LANG_CODES else None
+        if lang_code in target_languages:
+            return lang_code
+        else:
+            return None # Detected language is not in our target list
     except:
         return None
 
@@ -312,19 +311,69 @@ def extract_paragraph_blocks(pdf_file, expected_layout='single', multi_column_th
         st.error(f"Error opening or processing PDF: {e}")
         return pd.DataFrame()
 
-def analyze_paragraphs_language(df_paragraphs):
+# def analyze_paragraphs_language(df_paragraphs):
+#     analyzed_data = []
+#     for index, row in df_paragraphs.iterrows():
+#         text = row['text']
+#         lang_code = robust_detect_language(text)
+#         language = get_language_name(lang_code)
+#         analyzed_data.append({
+#             'page': row['page'],
+#             'layout': row['layout'],
+#             'word_count': row['word_count'], # Use existing word_count
+#             'text': text,
+#             'language_code': lang_code,
+#             'language': language
+#         })
+#     df_analyzed = pd.DataFrame(analyzed_data)
+#     major_language = 'Unknown'
+#     if not df_analyzed.empty:
+#         language_counts = Counter(df_analyzed['language'])
+#         if language_counts:
+#             major_language = language_counts.most_common(1)[0][0]
+#         df_analyzed['is_foreign'] = df_analyzed['language'] != major_language
+#         df_analyzed['is_major'] = df_analyzed['language'] == major_language
+#     else:
+#         df_analyzed['is_foreign'] = False
+#         df_analyzed['is_major'] = False
+#     st.sidebar.write(f"✅ Major language detected: {major_language}")
+#     return df_analyzed
+
+def enhanced_analyze_paragraphs_language(df_paragraphs):
     analyzed_data = []
     for index, row in df_paragraphs.iterrows():
         text = row['text']
-        lang_code = detect_language_limited_langdetect(text)
-        language = get_language_name(lang_code)
+        initial_lang_code = robust_detect_language(text)
+        language = get_language_name(initial_lang_code)
+        confidence_scores = {}
+
+        if initial_lang_code:
+            confidence_scores[initial_lang_code] = 1.0
+
+        # Apply language-specific style checks
+        for target_code, styles in LANGUAGE_STYLES.items():
+            confidence_scores[target_code] = confidence_scores.get(target_code, 0.0)
+            for style_check in styles:
+                if callable(style_check):
+                    if style_check(text):
+                        confidence_scores[target_code] += 0.4
+                elif style_check.search(text):
+                    confidence_scores[target_code] += 0.3
+
+        # Determine the language based on combined confidence
+        final_lang_code = initial_lang_code
+        if confidence_scores:
+            final_lang_code = max(confidence_scores, key=confidence_scores.get)
+
+        final_language = get_language_name(final_lang_code)
+
         analyzed_data.append({
             'page': row['page'],
             'layout': row['layout'],
-            'word_count': row['word_count'], # Use existing word_count
+            'word_count': row['word_count'],
             'text': text,
-            'language_code': lang_code,
-            'language': language
+            'language_code': final_lang_code,
+            'language': final_language
         })
     df_analyzed = pd.DataFrame(analyzed_data)
     major_language = 'Unknown'
@@ -340,8 +389,6 @@ def analyze_paragraphs_language(df_paragraphs):
     st.sidebar.write(f"✅ Major language detected: {major_language}")
     return df_analyzed
 
-
-
 def verify_foreign_language_google(df_foreign, enable_google_verification=True):
     df_foreign['google_verified_language'] = None
     if not enable_google_verification:
@@ -356,44 +403,33 @@ def verify_foreign_language_google(df_foreign, enable_google_verification=True):
         detected_language = None
         error_occurred = False
 
-        if len(text) > MAX_CHUNK_LENGTH:
-            chunks = [text[i:i + MAX_CHUNK_LENGTH] for i in range(0, len(text), MAX_CHUNK_LENGTH)]
-            detected_languages = []
-            for chunk in chunks:
-                try:
-                    detection = translator.detect(chunk)
-                    detected_languages.append(detection.lang)
-                    time.sleep(0.1)  # Be gentle
-                except Exception as e:
-                    st.sidebar.error(f"🚫 Google Translate error for chunk: '{chunk[:50]}...' - {e}")
-                    error_occurred = True
-                    break  # Stop processing further chunks for this text
-            if detected_languages:
-                # Take the most frequent detected language among chunks
-                language_counts = Counter(detected_languages)
-                most_common_lang = language_counts.most_common(1)[0][0]
-                if most_common_lang in LANGUAGES:
-                    detected_language = LANGUAGES[most_common_lang].capitalize()
-                else:
-                    detected_language = 'Unknown (Google)'
-        else:
+        # Aggressive chunking for Google Translate
+        max_chunk_length = 200
+        chunks = [text[i:i + max_chunk_length] for i in range(0, len(text), max_chunk_length)]
+        all_detected_google_langs = []
+        for chunk in chunks:
             try:
-                detection = translator.detect(text)
-                if detection.lang in LANGUAGES:
-                    detected_language = LANGUAGES[detection.lang].capitalize()
-                else:
-                    detected_language = 'Unknown (Google)'
-                time.sleep(0.1)  # Be gentle
+                detection = translator.detect(chunk)
+                all_detected_google_langs.append(detection.lang)
+                time.sleep(0.2)
             except Exception as e:
-                st.sidebar.error(f"🚫 Google Translate error for text: '{text[:50]}...' - {e}")
+                st.sidebar.error(f"🚫 Google Translate error for chunk: '{chunk[:50]}...' - {e}")
                 error_occurred = True
+                break
 
-        if detected_language and not error_occurred:
-            df_foreign.loc[index, 'google_verified_language'] = detected_language
+        if all_detected_google_langs and not error_occurred:
+            lang_counts = Counter(all_detected_google_langs)
+            most_common_lang = lang_counts.most_common(1)[0][0]
+            if most_common_lang in LANGUAGES:
+                detected_language = LANGUAGES[most_common_lang].capitalize()
+            else:
+                detected_language = 'Unknown (Google)'
         elif error_occurred:
-            df_foreign.loc[index, 'google_verified_language'] = 'Error (Google)'
-        elif not detected_language and not error_occurred:
-            df_foreign.loc[index, 'google_verified_language'] = 'Unknown (Google)'
+            detected_language = 'Error (Google)'
+        else:
+            detected_language = 'Unknown (Google)'
+
+        df_foreign.loc[index, 'google_verified_language'] = detected_language
 
     verification_status.success("✅ Google Translate verification complete.")
     return df_foreign
@@ -422,7 +458,7 @@ def main():
                 df_paragraphs = extract_paragraph_blocks(pdf_file, expected_layout, MULTI_COLUMN_THRESHOLD_PERCENT)
 
             if not df_paragraphs.empty:
-                with st.spinner("Analyzing language..."):
+                with st.spinner("Analyzing language (Initial)..."):
                     df_language_analysis = analyze_paragraphs_language(df_paragraphs)
 
                 major_lang = ""
@@ -430,7 +466,7 @@ def main():
                 if len(major_langs) > 0:
                     major_lang = ", ".join(major_langs)
 
-                df_foreign_initial = df_language_analysis.loc[(df_language_analysis['is_foreign'] == True) &(df_language_analysis['language']!='Unknown')][['page', 'word_count', 'text', 'language']].copy()
+                df_foreign_initial = df_language_analysis.loc[(df_language_analysis['is_foreign'] == True) & (df_language_analysis['language'] != 'Unknown')][['page', 'word_count', 'text', 'language']].copy()
 
                 st.subheader("Detected Foreign Language Segments (Initial)")
                 st.write(f"Major Language(s): {major_lang}")
