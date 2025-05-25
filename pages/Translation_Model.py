@@ -9,7 +9,7 @@ from googletrans import Translator
 MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 TOP_K = 30
 PKL_FILE = "paragraphs_with_embeddings_v2.pkl"
-SIMILARITY_THRESHOLD = 0.4
+SIMILARITY_THRESHOLD = 0.45
 
 
 # # --- UI Config ---
